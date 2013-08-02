@@ -80,7 +80,8 @@ char *state_str[] = { "unconnected", "waiting input", "waiting output",
 #define PORT_RAWLP		2 /* Port will not do telnet negotiation and
                                      termios setting, open for output only. */
 #define PORT_TELNET		3 /* Port will do telnet negotiation. */
-char *enabled_str[] = { "off", "raw", "rawlp", "telnet" };
+#define PORT_REMOTE_RAW         4 /* Remote port in RAW. */
+char *enabled_str[] = { "off", "raw", "rawlp", "telnet", "rraw" };
 
 #define PORT_BUFSIZE	64
 
@@ -222,12 +223,18 @@ typedef struct port_info
     trace_t bt;
 
     dev_info_t dinfo; /* device configuration information */
+
+    /* Timer for restarting port when startup_port failed */
+    int restart_timeout;
+    int restart_timeout_left;
+    sel_timer_t *restart_timer;
 } port_info_t;
 
 port_info_t *ports = NULL; /* Linked list of ports. */
 
 static void shutdown_port(port_info_t *port, char *reason);
 static void finish_shutdown_port(port_info_t *port);
+static char* startup_port(port_info_t *port);
 
 /* The init sequence we use. */
 static unsigned char telnet_init_seq[] = {
@@ -418,6 +425,8 @@ init_port_data(port_info_t *port)
     port->bt.file = -1;
     port->bt.timestamp = 0;
     port->bt.hexdump = 0;
+
+    port->restart_timeout = 0;
 }
 
 static void
@@ -426,6 +435,20 @@ reset_timer(port_info_t *port)
     port->timeout_left = port->timeout;
 }
 
+static void
+reset_restart_timer(port_info_t *port)
+{
+    port->restart_timeout_left = port->restart_timeout;
+}
+
+static void
+tick_timer(sel_timer_t *timer)
+{
+    struct timeval then;
+    gettimeofday(&then, NULL);
+    then.tv_sec += 1;
+    sel_start_timer(timer, &then);
+}
 
 static int
 timestamp(trace_t *tr, char *buf, int size)
@@ -802,10 +825,18 @@ handle_tcp_fd_read(int fd, void *data)
 	/* Got an error on the read, shut down the port. */
 	syslog(LOG_ERR, "read error for port %s: %m", port->portname);
 	shutdown_port(port, "tcp read error");
+	if (PORT_REMOTE_RAW == port->enabled) {
+	    syslog(LOG_ERR, "Reconnect to port %s", port->portname);
+	    startup_port(port);
+	}
 	return;
     } else if (count == 0) {
 	/* The other end closed the port, shut it down. */
 	shutdown_port(port, "tcp read close");
+	if (PORT_REMOTE_RAW == port->enabled) {
+	    syslog(LOG_ERR, "Reconnect to port %s", port->portname);
+	    startup_port(port);
+	}
 	return;
     }
     port->tcp_to_dev.cursize = count;
@@ -1772,6 +1803,20 @@ startup_port(port_info_t *port)
 	return "Unable to create TCP socket";
     }
 
+    if (PORT_REMOTE_RAW == port->enabled) {
+	if (connect(port->acceptfd, (struct sockaddr *) &port->tcpport, sizeof(port->tcpport)) == -1) {
+	    close(port->acceptfd);
+	    syslog(LOG_ERR, "Unable to connect to remote port: %m. Reconnect after %d seconds", port->restart_timeout);
+	    reset_restart_timer(port);
+	    tick_timer(port->restart_timer);
+	    return NULL;
+	}
+	port->tcpfd = port->acceptfd;
+	memcpy(&port->remote, &port->tcpport, sizeof(port->remote));
+	setup_tcp_port(port);
+	return NULL;
+    }
+
     if (fcntl(port->acceptfd, F_SETFL, O_NONBLOCK) == -1) {
 	close(port->acceptfd);
 	return "Could not fcntl the accept port";
@@ -1854,6 +1899,9 @@ free_port(port_info_t *port)
     }
     if (port->new_config != NULL) {
 	free_port(port->new_config);
+    }
+    if (port->restart_timer != NULL) {
+	sel_free_timer(port->restart_timer);
     }
     free(port);
 }
@@ -2059,6 +2107,25 @@ got_timeout(selector_t  *sel,
     sel_start_timer(port->timer, &then);
 }
 
+static void
+got_restart_timeout(selector_t  *sel,
+                    sel_timer_t *timer,
+                    void        *data)
+{
+    port_info_t *port = (port_info_t *) data;
+
+    if (port->restart_timeout) {
+        port->restart_timeout_left--;
+        if (port->restart_timeout_left < 0) {
+            sel_stop_timer(port->restart_timer);
+            startup_port(port);
+            return;
+        }
+    }
+
+    tick_timer(port->restart_timer);
+}
+
 /* Create a port based on a set of parameters passed in. */
 char *
 portconfig(char *portnum,
@@ -2081,6 +2148,12 @@ portconfig(char *portnum,
 			&new_port->timer))
     {
 	free(new_port);
+	return "Could not allocate timer data";
+    }
+
+    if (sel_alloc_timer(ser2net_sel,
+			got_restart_timeout, new_port,
+			&new_port->restart_timer)) {
 	return "Could not allocate timer data";
     }
 
@@ -2110,6 +2183,8 @@ portconfig(char *portnum,
 	new_port->enabled = PORT_TELNET;
     } else if (strcmp(state, "off") == 0) {
 	new_port->enabled = PORT_DISABLED;
+    } else if (strcmp(state, "rraw") == 0) {
+	new_port->enabled = PORT_REMOTE_RAW;
     } else {
 	rv = "state was invalid";
 	goto errout;
@@ -2119,6 +2194,12 @@ portconfig(char *portnum,
     if (new_port->timeout == -1) {
 	rv = "timeout was invalid";
 	goto errout;
+    }
+
+    /* For remote mode, set up restart timeout instead of connection timeout. */
+    if (PORT_REMOTE_RAW == new_port->enabled) {
+	new_port->restart_timeout = new_port->timeout;
+	new_port->timeout = 0;
     }
 
     devinit(&(new_port->dinfo.termctl));

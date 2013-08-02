@@ -1,3 +1,12 @@
+2013-07-31  Longshine <longxianghe@gmail.com>
+
+	* utils.c: Copy input string to a temporary buffer before
+	calling strtok_r in scan_tcp_port.
+
+	* dataxfer.c: Add "rraw" state to enable ser2net sends serial
+	data to a remote endpoint, using original timeout as
+	reconnecting interval when connection fails.
+
 2013-07-26  Corey Minyard <minyard@acm.org>
 
 	* dataxfer.c: Fix a bug in format strings where hex element (\x)
