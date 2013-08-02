@@ -46,6 +46,7 @@
 #include "devcfg.h"
 #include "utils.h"
 #include "telnet.h"
+#include "http.h"
 
 extern selector_t *ser2net_sel;
 
@@ -80,8 +81,9 @@ char *state_str[] = { "unconnected", "waiting input", "waiting output",
 #define PORT_RAWLP		2 /* Port will not do telnet negotiation and
                                      termios setting, open for output only. */
 #define PORT_TELNET		3 /* Port will do telnet negotiation. */
-#define PORT_REMOTE_RAW         4 /* Remote port in RAW. */
-char *enabled_str[] = { "off", "raw", "rawlp", "telnet", "rraw" };
+#define PORT_REMOTE_RAW		4 /* Remote port in RAW. */
+#define PORT_HTTP		5 /* Port will process HTTP request. */
+char *enabled_str[] = { "off", "raw", "rawlp", "telnet", "rraw", "http" };
 
 #define PORT_BUFSIZE	64
 
@@ -223,6 +225,8 @@ typedef struct port_info
     trace_t bt;
 
     dev_info_t dinfo; /* device configuration information */
+
+    http_data_t ht_data;
 
     /* Timer for restarting port when startup_port failed */
     int restart_timeout;
@@ -629,6 +633,21 @@ handle_dev_fd_read(int fd, void *data)
     port_info_t *port = (port_info_t *) data;
     int count;
 
+    if (PORT_HTTP == port->enabled) {
+      count = read(fd, port->dev_to_tcp.buf, port->dev_to_tcp.maxsize);
+
+	char *rv = http_process_response(&port->ht_data, port->dev_to_tcp.buf, count);
+	if (rv) {
+	    /* Got an error on the read, shut down the port. */
+	    shutdown_port(port, rv);
+	    return;
+	}
+	if (port->dev_to_tcp.cursize > 0) {
+	    goto write_to_tcp;
+	}
+	return;
+    }
+
     port->dev_to_tcp.pos = 0;
     if (port->enabled == PORT_TELNET) {
 	/* Leave room for IACs. */
@@ -636,7 +655,7 @@ handle_dev_fd_read(int fd, void *data)
     } else {
 	count = read(fd, port->dev_to_tcp.buf, port->tcp_to_dev.maxsize);
     }
-
+write_to_tcp:
     if (port->dev_monitor != NULL) {
 	controller_write(port->dev_monitor,
 			 (char *) port->dev_to_tcp.buf,
@@ -819,6 +838,19 @@ handle_tcp_fd_read(int fd, void *data)
     port_info_t *port = (port_info_t *) data;
     int count;
 
+    if (PORT_HTTP == port->enabled) {
+	char *rv = http_process_request(&port->ht_data, fd);
+	if (rv) {
+	    /* Got an error on the read, shut down the port. */
+	    shutdown_port(port, rv);
+	    return;
+	}
+	if (port->tcp_to_dev.cursize > 0) {
+	    goto write_to_dev;
+	}
+	return;
+    }
+
     port->tcp_to_dev.pos = 0;
     count = read(fd, port->tcp_to_dev.buf, port->tcp_to_dev.maxsize);
     if (count < 0) {
@@ -841,6 +873,7 @@ handle_tcp_fd_read(int fd, void *data)
     }
     port->tcp_to_dev.cursize = count;
 
+write_to_dev:
     port->tcp_bytes_received += count;
 
     if (port->enabled == PORT_TELNET) {
@@ -922,6 +955,7 @@ static void
 tcp_fd_write(port_info_t *port, struct sbuf *buf)
 {
     telnet_data_t *td = &port->tn_data;
+    http_data_t *hd = &port->ht_data;
     int buferr, reterr;
 
     if (buffer_cursize(&td->out_telnet_cmd) > 0) {
@@ -944,6 +978,26 @@ tcp_fd_write(port_info_t *port, struct sbuf *buf)
 	}
     }
 
+    if (buffer_cursize(&hd->response) > 0) {
+      reterr = buffer_write(port->tcpfd, &hd->response, &buferr);
+      if (reterr == -1) {
+          if (buferr == EPIPE) {
+              shutdown_port(port, "EPIPE");
+          } else {
+              /* Some other bad error. */
+              syslog(LOG_ERR, "The tcp write for port %s had error: %m",
+                     port->portname);
+              shutdown_port(port, "tcp write error");
+          }
+      }
+
+      if (buffer_cursize(&hd->response) > 0) {
+          /* If we have more http data to send, don't
+             send any real data. */
+          return;
+      }
+    }
+
     reterr = buffer_write(port->tcpfd, buf, &buferr);
     if (reterr == -1) {
 	if (buferr == EPIPE) {
@@ -957,6 +1011,12 @@ tcp_fd_write(port_info_t *port, struct sbuf *buf)
 	return;
     }
     if (buffer_cursize(buf) == 0) {
+	if (PORT_HTTP == port->enabled && HTTP_CLOSING == hd->state) {
+	    printf("state: %d", hd->state);
+	    hd->state = HTTP_UNCONNECTED;
+	    shutdown_port(port, "receive close frame");
+	    return;
+	}
 	/* We are done writing, turn the reader back on. */
 	sel_set_fd_read_handler(ser2net_sel, port->devfd,
 				SEL_FD_HANDLER_ENABLED);
@@ -1025,6 +1085,26 @@ telnet_output_ready(void *cb_data)
 			    SEL_FD_HANDLER_DISABLED);
     sel_set_fd_write_handler(ser2net_sel, port->tcpfd,
 			     SEL_FD_HANDLER_ENABLED);
+}
+
+static void
+http_output_ready(void *cb_data)
+{
+  port_info_t *port = cb_data;
+  sel_set_fd_read_handler(ser2net_sel, port->devfd, SEL_FD_HANDLER_DISABLED);
+  sel_set_fd_write_handler(ser2net_sel, port->tcpfd, SEL_FD_HANDLER_ENABLED);
+}
+
+static int
+http_to_dev_buf(void *cb_data, unsigned char *buf, int size)
+{
+  port_info_t *port = (port_info_t *) cb_data;
+  int len = size < PORT_BUFSIZE ? size : PORT_BUFSIZE;
+
+  port->tcp_to_dev.pos = 0;
+  buffer_output(&port->tcp_to_dev, buf, len);
+
+  return len;
 }
 
 /* Checks to see if some other port has the same device in use. */
@@ -1690,8 +1770,14 @@ setup_tcp_port(port_info_t *port)
 		    telnet_cmd_handler,
 		    telnet_cmds,
 		    telnet_init_seq, sizeof(telnet_init_seq));
+    } else if(PORT_HTTP == port->enabled) {
+	sel_set_fd_read_handler(ser2net_sel, port->devfd, SEL_FD_HANDLER_DISABLED);
+	sel_set_fd_write_handler(ser2net_sel, port->tcpfd, SEL_FD_HANDLER_DISABLED);
+	http_init(&port->ht_data, port, http_output_ready, http_to_dev_buf);
     } else {
 	buffer_init(&port->tn_data.out_telnet_cmd, NULL, 0);
+	buffer_init(&port->ht_data.request, NULL, 0);
+	buffer_init(&port->ht_data.response, NULL, 0);
 	sel_set_fd_read_handler(ser2net_sel, port->devfd,
 				SEL_FD_HANDLER_ENABLED);
 	if (port->banner)
@@ -2185,6 +2271,8 @@ portconfig(char *portnum,
 	new_port->enabled = PORT_DISABLED;
     } else if (strcmp(state, "rraw") == 0) {
 	new_port->enabled = PORT_REMOTE_RAW;
+    } else if (strcmp(state, "http") == 0) {
+	new_port->enabled = PORT_HTTP;
     } else {
 	rv = "state was invalid";
 	goto errout;
