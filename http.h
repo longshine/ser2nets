@@ -20,7 +20,7 @@
 #ifndef __HTTP_H__
 #define __HTTP_H__
 
-#include <buffer.h>
+#include "buffer.h"
 
 #define HTTP_BUFSIZE    1024
 
