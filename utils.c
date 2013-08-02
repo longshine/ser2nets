@@ -19,6 +19,7 @@
 
 /* This file holds basic utilities used by the ser2net program. */
 
+#include <stdlib.h>
 #include <string.h>
 #include <netdb.h>
 #include <sys/socket.h>
@@ -67,14 +68,19 @@ int
 scan_tcp_port(char *str, int domain,
 	      struct sockaddr_storage *addr, socklen_t *addr_len)
 {
-    char *strtok_data;
+    char *strtok_data, *strtok_buffer;
     char *ip;
     char *port;
     struct addrinfo hints, *ai;
+    int len = strlen(str);
 
     memset(addr, 0, sizeof(*addr));
 
-    ip = strtok_r(str, ",", &strtok_data);
+    strtok_buffer = malloc(len + 1);
+    memset(strtok_buffer, 0, len + 1);
+    memcpy(strtok_buffer, str, len);
+
+    ip = strtok_r(strtok_buffer, ",", &strtok_data);
     port = strtok_r(NULL, "", &strtok_data);
     if (port == NULL) {
 	port = ip;
@@ -84,9 +90,12 @@ scan_tcp_port(char *str, int domain,
     memset(&hints, 0, sizeof(hints));
     hints.ai_flags = AI_PASSIVE;
     hints.ai_family = domain;
-    if (getaddrinfo(ip, port, &hints, &ai))
+    if (getaddrinfo(ip, port, &hints, &ai)) {
+	free(strtok_buffer);
 	return -1;
+    }
 
+    free(strtok_buffer);
     memcpy(addr, ai->ai_addr, ai->ai_addrlen);
     *addr_len = ai->ai_addrlen;
     freeaddrinfo(ai);
