@@ -1,3 +1,8 @@
+2013-08-01  Longshine <longxianghe@gmail.com>
+
+	* dataxfer.c, http.c, http.h, sha1.c, sha1.h, Makefile.am:
+	Add support for HTTP/WebSocket connections.
+
 2013-07-31  Longshine <longxianghe@gmail.com>
 
 	* utils.c: Copy input string to a temporary buffer before
