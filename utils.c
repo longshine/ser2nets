@@ -72,15 +72,18 @@ scan_tcp_port(char *str, int domain,
     char *ip;
     char *port;
     struct addrinfo hints, *ai;
-    int len = strlen(str);
 
     memset(addr, 0, sizeof(*addr));
 
-    strtok_buffer = malloc(len + 1);
-    memset(strtok_buffer, 0, len + 1);
-    memcpy(strtok_buffer, str, len);
+    strtok_buffer = strdup(str);
 
-    ip = strtok_r(strtok_buffer, ",", &strtok_data);
+    if (strtok_buffer != NULL) {
+	/* Scan the temporary buffer */
+	str = strtok_buffer;
+    }
+    /* else { Out of memory, just scan the original string } */
+
+    ip = strtok_r(str, ",", &strtok_data);
     port = strtok_r(NULL, "", &strtok_data);
     if (port == NULL) {
 	port = ip;

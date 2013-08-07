@@ -3,14 +3,14 @@
 	* dataxfer.c, http.c, http.h, sha1.c, sha1.h, Makefile.am:
 	Add support for HTTP/WebSocket connections.
 
+	* dataxfer.c: Add "rraw" state to enable ser2net sends serial
+	data to a remote endpoint, using original timeout as
+	reconnecting interval when connection fails.
+
 2013-07-31  Longshine <longxianghe@gmail.com>
 
 	* utils.c: Copy input string to a temporary buffer before
 	calling strtok_r in scan_tcp_port.
-
-	* dataxfer.c: Add "rraw" state to enable ser2net sends serial
-	data to a remote endpoint, using original timeout as
-	reconnecting interval when connection fails.
 
 2013-07-26  Corey Minyard <minyard@acm.org>
 
