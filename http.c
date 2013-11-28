@@ -29,7 +29,11 @@
 #include "http.h"
 #include "sha1.h"
 
+#if DEBUG
 #define D(...) printf(__VA_ARGS__);
+#else
+#define D(...)
+#endif
 
 #define IS_WEBSOCKET(hd) hd->websocket_key[0]
 
@@ -197,6 +201,7 @@ ws_unmask(ws_frame_t *frm)
   }
 }
 
+#if DEBUG
 static void
 ws_print_frame(ws_frame_t *frm)
 {
@@ -220,6 +225,7 @@ ws_print_frame(ws_frame_t *frm)
   }
   D("\n")
 }
+#endif
 
 static int
 get_header_name(char *line, char *name_buf, int len)
