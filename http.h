@@ -27,6 +27,26 @@
 #define HTTP_CONNECTED 2
 #define HTTP_CLOSING 3
 
+#ifdef WORDS_BIGENDIAN
+typedef struct ws_hdr_s {
+  unsigned char FIN:1;
+  unsigned char RSV1:1;
+  unsigned char RSV2:1;
+  unsigned char RSV3:1;
+  unsigned char opcode:4;
+  unsigned char MASK:1;
+  unsigned char length:7;
+} ws_hdr_t;
+
+typedef union ws_length_s {
+  unsigned int len64;
+  unsigned int len16:16;
+  struct {
+    unsigned char MASK:1;
+    unsigned char len7:7;
+  };
+} ws_length_t;
+#else
 typedef struct ws_hdr_s {
   unsigned char opcode:4;
   unsigned char RSV3:1;
@@ -42,12 +62,13 @@ typedef union ws_length_s {
   unsigned int len16:16;
   unsigned int len64;
 } ws_length_t;
+#endif
 
 typedef struct ws_pdu_s {
   ws_hdr_t *hdr;
   ws_length_t *len;
-  unsigned char *payload;
   unsigned char *mask;
+  unsigned char *payload;
   unsigned int index;
   unsigned int left;
   unsigned char buf[HTTP_BUFSIZE];
@@ -67,7 +88,8 @@ typedef struct http_data_s
   int (*handle_request)(void *cb_data, unsigned char *buf, int size);
   int (*handle_response)(void *cb_data, unsigned char *buf, int size);
   char websocket_key[32];
-  ws_frame_t ws_frame;
+  ws_frame_t request_frame;
+  ws_frame_t response_frame;
 } http_data_t;
 
 void http_init(http_data_t *hd, void *cb_data,
@@ -75,6 +97,6 @@ void http_init(http_data_t *hd, void *cb_data,
                int (*handle_request)(void *, unsigned char *, int),
                int (*handle_response)(void *, unsigned char *, int));
 char* http_process_request(http_data_t *hd, int fd);
-char* http_process_response(http_data_t *hd, int fd);
+char* http_process_response(http_data_t *hd, unsigned char *buf, int len);
 
 #endif /* __HTTP_H__ */

@@ -29,6 +29,8 @@
 #include "http.h"
 #include "sha1.h"
 
+#define D(...) printf(__VA_ARGS__);
+
 #define IS_WEBSOCKET(hd) hd->websocket_key[0]
 
 #define WEBSOCKET_GUID "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -39,6 +41,7 @@
 #define WEBSOCKET_OPCODE_CLOSE 0x8
 #define WEBSOCKET_OPCODE_PING 0x9
 #define WEBSOCKET_OPCODE_PONG 0xA
+#define WEBSOCKET_DEFAULT_OPCODE WEBSOCKET_OPCODE_TXT
 
 #define WEBSOCKET_HEADER_SIZE 2
 #define WEBSOCKET_MASK_SIZE 4
@@ -51,7 +54,7 @@
 #define WEBSOCKET_UNEXTENDED(frm) ((frm)->hdr->length < WEBSOCKET_EXT16_LENGTH)
 #define WEBSOCKET_EXT16(frm) (WEBSOCKET_EXT16_LENGTH == ((frm)->hdr->length & 0xFF))
 #define WEBSOCKET_EXT64(frm) (WEBSOCKET_EXT64_LENGTH == ((frm)->hdr->length & 0xFF))
-#define WEBSOCKET_LENGTH(frm) (WEBSOCKET_UNEXTENDED(frm) ? (frm)->len->len7 : (WEBSOCKET_EXT16(frm) ? ntohs((frm)->len->len16) : (frm)->len->len64))
+#define WEBSOCKET_LENGTH(frm) ((frm)->len ? (WEBSOCKET_UNEXTENDED(frm) ? (frm)->len->len7 : (WEBSOCKET_EXT16(frm) ? ntohs((frm)->len->len16) : (frm)->len->len64)) : (frm)->hdr->length)
 #define WEBSOCKET_MASKED(frm) (frm->hdr->MASK)
 #define WEBSOCKET_FRAME_SIZE(frm) WEBSOCKET_LENGTH(frm) + WEBSOCKET_HEADER_SIZE \
                                   + (WEBSOCKET_UNEXTENDED(frm) ? 0 : (WEBSOCKET_EXT16(frm) ? WEBSOCKET_EXT16_SIZE : WEBSOCKET_EXT64_SIZE)) \
@@ -144,7 +147,7 @@ ws_init_frame(ws_frame_t *frm)
   memset(frm, 0, sizeof(ws_frame_t));
   frm->hdr = (ws_hdr_t *) frm->buf;
   frm->hdr->FIN = 1;
-  frm->hdr->opcode = WEBSOCKET_OPCODE_TXT;
+  frm->hdr->opcode = WEBSOCKET_DEFAULT_OPCODE;
   frm->left = -1;
 }
 
@@ -198,19 +201,24 @@ static void
 ws_print_frame(ws_frame_t *frm)
 {
   int i;
-  printf("FIN: %x, RSV1: %d, RSV2: %d, RSV3: %d, opcode: %d, MASK: %d, length: %d\n",
+  unsigned char *hdr = (unsigned char *) frm->hdr;
+  D("FIN: %x, RSV1: %d, RSV2: %d, RSV3: %d, opcode: %d, MASK: %d, length: %d\n",
           frm->hdr->FIN, frm->hdr->RSV1, frm->hdr->RSV2, frm->hdr->RSV3,
-          frm->hdr->opcode, frm->hdr->MASK, WEBSOCKET_LENGTH(frm));
-  if (WEBSOCKET_MASKED(frm)) {
-    printf("mask key:");
+          frm->hdr->opcode, frm->hdr->MASK, WEBSOCKET_LENGTH(frm))
+  if (WEBSOCKET_MASKED(frm) && frm->mask) {
+    D("mask key:")
     for (i = 0; i < WEBSOCKET_MASK_SIZE; i++) {
-      printf(" %02x", frm->mask[i]);
+      D(" %02x", frm->mask[i])
     }
-    printf("\n");
+    D("\n")
   }
   if (frm->payload) {
-    printf("payload: %s\n", frm->payload);
+    D("payload: %s\n", frm->payload)
   }
+  while (*hdr) {
+    D("%02x ", *(hdr++))
+  }
+  D("\n")
 }
 
 static int
@@ -260,7 +268,7 @@ prepare_response_headers(http_data_t *hd, int fd)
 static void
 send_ws_frame(http_data_t *hd, ws_frame_t *frm)
 {
-  //ws_print_frame(frm);
+//  ws_print_frame(frm);
   hd->handle_response(hd->cb_data, (unsigned char *) frm->hdr, WEBSOCKET_FRAME_SIZE(frm));
 }
 
@@ -271,11 +279,10 @@ send_ws_close_frame(http_data_t *hd)
   ws_init_frame(&ws_frame);
   ws_frame.hdr->opcode = WEBSOCKET_OPCODE_CLOSE;
   ws_set_payload_length(&ws_frame, 2);
-  //ws_append_payload(&ws_frame, "me", 2);
   WEBSOCKET_SET_CLOSE_REASON(&ws_frame, 1000);
+  hd->state = HTTP_CLOSING;
   hd->output_ready(hd->cb_data);
   send_ws_frame(hd, &ws_frame);
-  hd->state = HTTP_CLOSING;
 }
 
 void
@@ -294,35 +301,44 @@ http_init(http_data_t *hd, void *cb_data,
   hd->handle_request = handle_request;
   hd->handle_response = handle_response;
   memset(hd->websocket_key, 0, sizeof(hd->websocket_key));
-  ws_init_frame(&hd->ws_frame);
+  ws_init_frame(&hd->request_frame);
+}
+
+static void
+send_response(http_data_t *hd, unsigned char *buf, int len)
+{
+  if (IS_WEBSOCKET(hd)){
+    ws_init_frame(&hd->response_frame);
+    ws_set_payload_length(&hd->response_frame, len);
+    ws_append_payload(&hd->response_frame, buf, len);
+
+    send_ws_frame(hd, &hd->response_frame);
+  } else {
+    /* http mode */
+    hd->handle_response(hd->cb_data, buf, len);
+  }
 }
 
 char *
-http_process_response(http_data_t *hd, int fd)
+http_process_response(http_data_t *hd, unsigned char *buf, int len)
 {
-  if (IS_WEBSOCKET(hd)){
-    ws_frame_t ws_frame;
+  if (hd->state != HTTP_CONNECTED)
+    return NULL;
 
-    hd->response_buf_count = read(fd, hd->response_buf, HTTP_BUFSIZE);
+  base64_encode((char *) buf, len, (char *) hd->response_buf, HTTP_BUFSIZE);
+  hd->response_buf_count = strlen((char *) hd->response_buf);
+  //hd->response_buf_count = len;
+  //memcpy(hd->response_buf, buf, len);
 
-    ws_init_frame(&ws_frame);
-    ws_set_payload_length(&ws_frame, hd->response_buf_count);
-    ws_append_payload(&ws_frame, hd->response_buf, hd->response_buf_count);
+  send_response(hd, hd->response_buf, hd->response_buf_count);
 
-    send_ws_frame(hd, &ws_frame);
-  } else {
-    /* http mode */
-    hd->response_buf_count = read(fd, hd->response_buf, HTTP_BUFSIZE);
-    //printf("response: %d\n", hd->response_buf_count);
-    hd->handle_response(hd->cb_data, hd->response_buf, hd->response_buf_count);
-  }
   return NULL;
 }
 
 char *
 http_process_request(http_data_t *hd, int fd)
 {
-  unsigned char *ret, *buf;
+  unsigned char *ret = NULL, *buf = NULL;
   char line[HTTP_BUFSIZE];
   int header_len;
   char header[64];
@@ -392,7 +408,7 @@ http_process_request(http_data_t *hd, int fd)
   } else if (HTTP_CONNECTED == hd->state) {
     if (IS_WEBSOCKET(hd)){
       /* decode websocket frame */
-      ws_frame_t *frame = &hd->ws_frame;
+      ws_frame_t *frame = &hd->request_frame;
       unsigned char *hdr;
 
       buf = hd->request_buf;
@@ -452,8 +468,9 @@ http_process_request(http_data_t *hd, int fd)
           if (frame->hdr->opcode == WEBSOCKET_OPCODE_CLOSE) {
             //printf("close reason: %d\n", WEBSOCKET_GET_CLOSE_REASON(frame));
             send_ws_close_frame(hd);
+          } else {
+            hd->handle_request(hd->cb_data, frame->payload, WEBSOCKET_LENGTH(frame));
           }
-          hd->handle_request(hd->cb_data, frame->payload, WEBSOCKET_LENGTH(frame));
           ws_init_frame(frame);
         }
       }
@@ -470,14 +487,6 @@ http_process_request(http_data_t *hd, int fd)
     hd->request_buf[i] = buf[i];
   }
   hd->request_buf[hd->request_buf_start] = '\0';
-
-//  memcpy(line, buf, hd->request_buf_start);
-//  memcpy(hd->request_buf, line, hd->request_buf_start);
-//  hd->request_buf[hd->request_buf_start] = '\0';
-
-//  if (HTTP_CONNECTED == hd->state) {
-//    printf("%s\n", hd->request_buf);
-//  }
 
   return NULL;
 }

@@ -61,6 +61,17 @@ devinit(struct termios *termctl)
     termctl->c_iflag |= IGNBRK;
 }
 
+void
+devinitinfo(dev_info_t *dinfo)
+{
+    devinit(&(dinfo->termctl));
+
+    dinfo->allow_2217 = 0;
+    dinfo->disablebreak = 0;
+    dinfo->banner = NULL;
+    dinfo->is_tos_frame = 0;
+}
+
 /* Configure a serial port control structure based upon input strings
    in instr.  These strings are described in the man page for this
    program. */
@@ -197,6 +208,8 @@ devconfig(char *instr, dev_info_t *dinfo)
 	    dinfo->trace_both.file = find_tracefile(pos + 3);
 	} else if ((dinfo->banner = find_banner(pos))) {
 	    /* It's a banner to display at startup, it's already set. */
+	} else if (strcmp(pos, "tos") == 0) {
+	    dinfo->is_tos_frame = 1;
 	} else {
 	    /* fprintf( stderr, "Unknown token %s\n", pos );     */
 	    rv = -1;

@@ -53,7 +53,12 @@ typedef struct dev_info {
     trace_info_t trace_read;
     trace_info_t trace_write;
     trace_info_t trace_both;
+
+    /* Process TinyOS frames */
+    int is_tos_frame;
 } dev_info_t;
+
+void devinitinfo(dev_info_t *info);
 
 /* Called to change the configuration of a device based upon the
    string parameters. */
