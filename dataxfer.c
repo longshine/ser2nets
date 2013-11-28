@@ -21,10 +21,8 @@
    ports and the TCP ports. */
 
 #include <termios.h>
-#include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/time.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
 #include <arpa/inet.h>
 #include <stdlib.h>
@@ -33,7 +31,6 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <netdb.h>
 #include <errno.h>
 #include <syslog.h>
 #include <string.h>
@@ -126,13 +123,13 @@ typedef struct port_info
 
     /* Information about the TCP port. */
     char               *portname;       /* The name given for the port. */
-    struct sockaddr_storage tcpport;	/* The TCP port to listen on
-					   for connections to this
-					   terminal device. */
-    socklen_t      tcpport_len;         /* Length of above */
-    int            acceptfd;		/* The file descriptor used to
+    int                is_stdio;        /* Do stdio on the port? */
+    int                is_client;       /* Is client socket? */
+    struct addrinfo    *ai;		/* The address list for the portname. */
+    int            *acceptfds;		/* The file descriptor used to
 					   accept connections on the
 					   TCP port. */
+    unsigned int   nr_acceptfds;
     int            tcpfd;		/* When connected, the file
                                            descriptor for the TCP
                                            port used for I/O. */
@@ -390,14 +387,15 @@ init_port_data(port_info_t *port)
 {
     port->enabled = PORT_DISABLED;
     port->portname = NULL;
-    memset(&(port->tcpport), 0, sizeof(port->tcpport));
-    port->tcpport_len = 0;
-    port->acceptfd = -1;
+    port->acceptfds = NULL;
     port->tcpfd = -1;
     port->timeout = 0;
     port->next = NULL;
     port->new_config = NULL;
     port->tcp_monitor = NULL;
+    port->is_stdio = 0;
+    port->is_client = 0;
+    port->ai = NULL;
     
     port->devname = NULL;
     port->devfd = -1;
@@ -1848,19 +1846,13 @@ handle_accept_port_read(int fd, void *data)
 static char *
 startup_port(port_info_t *port)
 {
-    int optval = 1;
-    int portnum;
-
-    portnum = port_from_in_addr(port->tcpport.ss_family,
-				(struct sockaddr *) &port->tcpport);
-    if (portnum == 0) {
-	/* A zero port means use stdin/stdout */
+    if (port->is_stdio) {
 	if (is_device_already_inuse(port)) {
 	    char *err = "Port's device already in use\n\r";
 	    write_ignore_fail(0, err, strlen(err));
 	    exit(1);
 	} else {
-	    port->acceptfd = -1;
+	    port->acceptfds = NULL;
 	    port->tcpfd = 0; /* stdin */
 	    if (setup_tcp_port(port) == -1)
 		exit(1);
@@ -1868,81 +1860,40 @@ startup_port(port_info_t *port)
 	return NULL;
     }
 
-    if (scan_tcp_port(port->portname, AF_UNSPEC,
-		      &port->tcpport, &port->tcpport_len)
-	== -1)
-    {
-	return "port number was invalid";
-    }
-    port->acceptfd = socket(port->tcpport.ss_family, SOCK_STREAM, 0);
-    if ((port->acceptfd == -1) && (errno == EAFNOSUPPORT)) {
-	/* Retry IPV4-only */
-	if (scan_tcp_port(port->portname, AF_INET,
-			  &port->tcpport, &port->tcpport_len)
-	    == -1)
-	{
-	    return "port number was invalid";
-	}
-	port->acceptfd = socket(port->tcpport.ss_family, SOCK_STREAM, 0);
-    }
-    if (port->acceptfd == -1) {
-	return "Unable to create TCP socket";
-    }
-
-    if (PORT_REMOTE_RAW == port->enabled) {
-	if (connect(port->acceptfd, (struct sockaddr *) &port->tcpport, sizeof(port->tcpport)) == -1) {
-	    close(port->acceptfd);
+    if (port->is_client) {
+	port->acceptfds = connect_socket(port->ai, &port->nr_acceptfds);
+	if (port->acceptfds == NULL) {
 	    syslog(LOG_ERR, "Unable to connect to remote port: %m. Reconnect after %d seconds", port->restart_timeout);
 	    reset_restart_timer(port);
 	    tick_timer(port->restart_timer);
 	    return NULL;
 	}
-	port->tcpfd = port->acceptfd;
-	memcpy(&port->remote, &port->tcpport, sizeof(port->remote));
-	setup_tcp_port(port);
+	if (port->nr_acceptfds > 0) {
+	    /* TODO process only the first by now */
+	    port->tcpfd = port->acceptfds[0];
+	    memcpy(&port->remote, &port->ai->ai_addr, port->ai->ai_addrlen);
+	    setup_tcp_port(port);
+	}
 	return NULL;
     }
 
-    if (fcntl(port->acceptfd, F_SETFL, O_NONBLOCK) == -1) {
-	close(port->acceptfd);
-	return "Could not fcntl the accept port";
-    }
+    port->acceptfds = open_socket(port->ai, handle_accept_port_read, port,
+				  &port->nr_acceptfds);
 
-    if (setsockopt(port->acceptfd,
-		   SOL_SOCKET,
-		   SO_REUSEADDR,
-		   (void *)&optval,
-		   sizeof(optval)) == -1) {
-	close(port->acceptfd);
-	return "Unable to set reuseaddress on socket";
-    }
-
-    check_ipv6_only(port->tcpport.ss_family,
-		    (struct sockaddr *) &port->tcpport,
-		    port->acceptfd);
-
-    if (bind(port->acceptfd,
-	     (struct sockaddr *) &port->tcpport,
-	     port->tcpport_len) == -1) {
-	close(port->acceptfd);
-	return "Unable to bind TCP port";
-    }
-
-    if (listen(port->acceptfd, 1) != 0) {
-	close(port->acceptfd);
-	return "Unable to listen to TCP port";
-    }
-
-    sel_set_fd_handlers(ser2net_sel,
-			port->acceptfd,
-			port,
-			handle_accept_port_read,
-			NULL,
-			NULL);
-    sel_set_fd_read_handler(ser2net_sel, port->acceptfd,
-			    SEL_FD_HANDLER_ENABLED);
+    if (port->acceptfds == NULL)
+	return "Unable to create TCP socket";
 
     return NULL;
+}
+
+static void
+redo_port_handlers(port_info_t *port)
+{
+    unsigned int i;
+
+    for (i = 0; i < port->nr_acceptfds; i++)
+	sel_set_fd_handlers(ser2net_sel, port->acceptfds[i], port,
+			    handle_accept_port_read, NULL, NULL);
 }
 
 char *
@@ -1950,18 +1901,22 @@ change_port_state(port_info_t *port, int state)
 {
     char *rv = NULL;
 
-    if (port->enabled == state) {
+    if (port->enabled == state)
 	return rv;
-    }
 
     if (state == PORT_DISABLED) {
-	if (port->acceptfd != -1) {
-	    sel_set_fd_read_handler(ser2net_sel,
-				    port->acceptfd,
-				    SEL_FD_HANDLER_DISABLED);
-	    sel_clear_fd_handlers(ser2net_sel, port->acceptfd);
-	    close(port->acceptfd);
-	    port->acceptfd = -1;
+	if (port->acceptfds != NULL) {
+	    unsigned int i;
+
+	    for (i = 0; i < port->nr_acceptfds; i++) {
+		sel_set_fd_read_handler(ser2net_sel,
+					port->acceptfds[i],
+					SEL_FD_HANDLER_DISABLED);
+		sel_clear_fd_handlers(ser2net_sel, port->acceptfds[i]);
+		close(port->acceptfds[i]);
+	    }
+	    free(port->acceptfds);
+	    port->acceptfds = NULL;
 	}
     } else if (port->enabled == PORT_DISABLED) {
 	rv = startup_port(port);
@@ -1977,26 +1932,24 @@ free_port(port_info_t *port)
 {
     sel_free_timer(port->timer);
     change_port_state(port, PORT_DISABLED);
-    if (port->portname != NULL) {
+    if (port->portname)
 	free(port->portname);
-    }
-    if (port->devname != NULL) {
+    if (port->devname)
 	free(port->devname);
-    }
-    if (port->new_config != NULL) {
+    if (port->new_config)
 	free_port(port->new_config);
-    }
-    if (port->restart_timer != NULL) {
+    if (port->ai)
+	freeaddrinfo(port->ai);
+    if (port->acceptfds)
+	free(port->acceptfds);
+    if (port->restart_timer)
 	sel_free_timer(port->restart_timer);
-    }
     free(port);
 }
 
 static void
 finish_shutdown_port(port_info_t *port)
 {
-    int portnum;
-
     /* To avoid blocking on close if we have written bytes and are in
        flow-control, we flush the output queue. */
     if (port->devfd != -1) {
@@ -2022,21 +1975,20 @@ finish_shutdown_port(port_info_t *port)
 	free(port->devstr);
 	port->devstr = NULL;
     }
-    if (port->closestr)
+    if (port->closestr) {
 	free(port->closestr);
+	port->closestr = NULL;
+    }
     port->dev_to_tcp_state = PORT_UNCONNECTED;
     buffer_reset(&port->dev_to_tcp);
     port->dev_bytes_received = 0;
     port->dev_bytes_sent = 0;
 
-    portnum = port_from_in_addr(port->tcpport.ss_family,
-				(struct sockaddr *) &port->tcpport);
-    if (portnum == 0) {
+    if (port->is_stdio)
 	/* This was a zero port (for stdin/stdout), this is only
 	   allowed with one port at a time, and we shut down when it
 	   closes. */
 	exit(0);
-    }
 
     /* If the port has been disabled, then delete it.  Check this before
        the new config so the port will be deleted properly and not
@@ -2052,17 +2004,20 @@ finish_shutdown_port(port_info_t *port)
 	    curr = curr->next;
 	}
 	if (curr != NULL) {
-	    if (prev == NULL) {
+	    if (prev == NULL)
 		ports = curr->next;
-	    } else {
+	    else
 		prev->next = curr->next;
-	    }
 	    free_port(curr);
 	}
 
 	return; /* We have to return here because we no longer have a port. */
     }
 
+    /*
+     * The configuration for this port has changed, install it now that
+     * the user has closed the connection.
+     */
     if (port->new_config != NULL) {
 	port_info_t *curr, *prev;
 
@@ -2074,14 +2029,10 @@ finish_shutdown_port(port_info_t *port)
 	}
 	if (curr != NULL) {
 	    port = curr->new_config;
-	    port->acceptfd = curr->acceptfd;
-	    sel_set_fd_handlers(ser2net_sel,
-				port->acceptfd,
-				port,
-				handle_accept_port_read,
-				NULL,
-				NULL);
-	    curr->acceptfd = -1;
+	    port->acceptfds = curr->acceptfds;
+	    port->nr_acceptfds = curr->nr_acceptfds;
+	    curr->acceptfds = NULL;
+	    redo_port_handlers(port);
 	    port->next = curr->next;
 	    if (prev == NULL) {
 		ports = port;
@@ -2212,6 +2163,17 @@ got_restart_timeout(selector_t  *sel,
     tick_timer(port->restart_timer);
 }
 
+static int
+isallzero(char *str)
+{
+    if (*str == '\0')
+	return 0;
+
+    while (*str == '0')
+	str++;
+    return *str == '\0';
+}
+
 /* Create a port based on a set of parameters passed in. */
 char *
 portconfig(char *portnum,
@@ -2246,17 +2208,15 @@ portconfig(char *portnum,
     /* Errors from here on out must goto errout. */
     init_port_data(new_port);
 
-    new_port->portname = malloc(strlen(portnum)+1);
-    if (new_port->portname == NULL) {
+    new_port->portname = strdup(portnum);
+    if (!new_port->portname) {
 	rv = "unable to allocate port name";
 	goto errout;
     }
-    strcpy(new_port->portname, portnum);
 
-    if (scan_tcp_port(new_port->portname, AF_UNSPEC,
-		      &new_port->tcpport, &new_port->tcpport_len)
-        == -1)
-    {
+    if (isallzero(new_port->portname)) {
+	new_port->is_stdio = 1;
+    } else if (scan_tcp_port(new_port->portname, &new_port->ai)) {
 	rv = "port number was invalid";
 	goto errout;
     }
@@ -2271,6 +2231,7 @@ portconfig(char *portnum,
 	new_port->enabled = PORT_DISABLED;
     } else if (strcmp(state, "rraw") == 0) {
 	new_port->enabled = PORT_REMOTE_RAW;
+	new_port->is_client = 1;
     } else if (strcmp(state, "http") == 0) {
 	new_port->enabled = PORT_HTTP;
     } else {
@@ -2321,15 +2282,11 @@ portconfig(char *portnum,
 		int new_state = new_port->enabled;
 
 		new_port->enabled = curr->enabled;
-		new_port->acceptfd = curr->acceptfd;
+		new_port->acceptfds = curr->acceptfds;
+		new_port->nr_acceptfds = curr->nr_acceptfds;
 		curr->enabled = PORT_DISABLED;
-		curr->acceptfd = -1;
-		sel_set_fd_handlers(ser2net_sel,
-				    new_port->acceptfd,
-				    new_port,
-				    handle_accept_port_read,
-				    NULL,
-				    NULL);
+		curr->acceptfds = NULL;
+		redo_port_handlers(new_port);
 
 		/* Just replace with the new data. */
 		if (prev == NULL) {
