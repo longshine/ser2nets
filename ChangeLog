@@ -1,3 +1,8 @@
+2011-12-21  Longshine <longxianghe@gmail.com>
+
+	* dataxfer.c, http.c, http.h, sha1.c ,sha1.h: Add support for 
+	HTTP/WebSocket connections.
+
 2011-12-17  Longshine <longxianghe@gmail.com>
 
 	* dataxfer.c: Add "rraw" state to enable ser2net sends serial
