@@ -2,6 +2,9 @@
 
 	* dataxfer.c, http.c, http.h, list.c, list.h: Add support for
 	multi-connections.
+
+	* devcfg.c, devcfg.h: Add 'tos' to indicate unwrapping TinyOS
+	frames.
 	
 2011-12-21  Longshine <longxianghe@gmail.com>
 
