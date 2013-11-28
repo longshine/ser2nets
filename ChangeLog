@@ -1,3 +1,9 @@
+2011-12-17  Longshine <longxianghe@gmail.com>
+
+	* dataxfer.c: Add "rraw" state to enable ser2net sends serial
+	data to a remote endpoint, using original timeout as
+	reconnecting interval when connection fails.
+
 2009-11-12  Corey Minyard <minyard@acm.org>
 
 	* ser2net.spec, ser2net.spec.in: Fix the version in the spec
