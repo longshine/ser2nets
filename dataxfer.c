@@ -114,6 +114,7 @@ typedef struct tcp_info_s
 					   TCP port. */
     unsigned int tcp_bytes_sent;        /* Number of bytes written to the
 					   TCP port. */
+    struct sbuf *banner;                /* Outgoing banner */
 
     /* Information use when transferring information from the terminal
        device to the TCP port. */
@@ -121,9 +122,6 @@ typedef struct tcp_info_s
 						   data from the device to
                                                    the TCP port. */
     struct sbuf    dev_to_tcp;			/* Buffer struct for
-						   device to TCP
-						   transfers. */
-    unsigned char  dev_to_tcpbuf[PORT_BUFSIZE]; /* Buffer used for
 						   device to TCP
 						   transfers. */
 
@@ -164,14 +162,6 @@ typedef struct port_info
 					   wait without any I/O before
 					   we shut the port down. */
 
-    int            timeout_left;	/* The amount of time left (in
-					   seconds) before the timeout
-					   goes off. */
-
-    sel_timer_t *timer;			/* Used to timeout when the no
-					   I/O has been seen for a
-					   certain period of time. */
-
     /* Information about the TCP port. */
     char               *portname;       /* The name given for the port. */
     int                is_stdio;        /* Do stdio on the port? */
@@ -187,7 +177,6 @@ typedef struct port_info
 					   TCP port. */
     unsigned int tcp_bytes_sent;        /* Number of bytes written to the
 					   TCP port. */
-    struct sbuf *banner;		/* Outgoing banner */
 
     /* Information about the terminal device. */
     char           *devname;		/* The full path to the device */
@@ -449,7 +438,6 @@ init_port_data(port_info_t *port)
 		sizeof(port->tcp_to_devbuf));
     port->tcp_bytes_received = 0;
     port->tcp_bytes_sent = 0;
-    port->banner = NULL;
     port->dev_to_tcp_state = PORT_UNCONNECTED;
     buffer_init(&port->dev_to_tcp, port->dev_to_tcpbuf,
 		sizeof(port->dev_to_tcpbuf));
@@ -764,6 +752,11 @@ tcp_close(tcp_info_t *tcp)
 	sel_clear_fd_handlers(ser2net_sel, tcp->tcpfd);
 	close(tcp->tcpfd);
     }
+    if (tcp->banner) {
+	free(tcp->banner->buf);
+ 	free(tcp->banner);
+	tcp->banner = NULL;
+    }
     tcp->tcp_bytes_received = 0;
     tcp->tcp_bytes_sent = 0;
     tcp->dev_to_tcp_state = PORT_UNCONNECTED;
@@ -865,6 +858,7 @@ retry_write:
 	}
     } else {
 	tcp->tcp_bytes_sent += count;
+	port->tcp_bytes_sent += count;
 	tcp->dev_to_tcp.cursize -= count;
 	if (tcp->dev_to_tcp.cursize != 0) {
 	    /* We didn't write all the data, shut off the reader and
@@ -1092,6 +1086,7 @@ handle_tcp_fd_read(int fd, void *data)
 
 write_to_dev:
     port->tcp_bytes_received += count;
+    tcp->tcp_bytes_received += count;
 
     if (port->enabled == PORT_TELNET) {
 	port->tcp_to_dev.cursize = process_telnet_data(port->tcp_to_dev.buf,
@@ -1267,17 +1262,17 @@ handle_tcp_fd_banner_write(int fd, void *data)
     port_info_t *port = (port_info_t *) data;
     tcp_info_t *tcp = tcp_find_in_port(port, fd);
 
-    tcp_fd_write(tcp, port->banner);
-    if (buffer_cursize(port->banner) == 0) {
+    tcp_fd_write(tcp, tcp->banner);
+    if (buffer_cursize(tcp->banner) == 0) {
 	sel_set_fd_handlers(ser2net_sel,
 			    tcp->tcpfd,
 			    port,
 			    handle_tcp_fd_read,
 			    handle_tcp_fd_write,
 			    handle_tcp_fd_except);
-	free(port->banner->buf);
-	free(port->banner);
-	port->banner = NULL;
+	free(tcp->banner->buf);
+	free(tcp->banner);
+	tcp->banner = NULL;
     }
 }
 
@@ -1939,8 +1934,8 @@ setup_tcp_port(port_info_t *port, tcp_info_t *tcp)
     port->is_2217 = 0;
     port->break_set = 0;
 
-    port->banner = process_str_to_buf(port, port->dinfo.banner);
-    if (port->banner)
+    tcp->banner = process_str_to_buf(port, port->dinfo.banner);
+    if (tcp->banner)
 	tcp_write_handler = handle_tcp_fd_banner_write;
     else
 	tcp_write_handler = handle_tcp_fd_write;
@@ -2017,7 +2012,7 @@ setup_tcp_port(port_info_t *port, tcp_info_t *tcp)
 	buffer_init(&tcp->ht_data.response, NULL, 0);
 	sel_set_fd_read_handler(ser2net_sel, port->devfd,
 				SEL_FD_HANDLER_ENABLED);
-	if (port->banner)
+	if (tcp->banner)
 	    sel_set_fd_write_handler(ser2net_sel, tcp->tcpfd,
 				     SEL_FD_HANDLER_ENABLED);
     }
@@ -2173,7 +2168,6 @@ change_port_state(port_info_t *port, int state)
 static void
 free_port(port_info_t *port)
 {
-    sel_free_timer(port->timer);
     change_port_state(port, PORT_DISABLED);
     if (port->portname)
 	free(port->portname);
@@ -2208,11 +2202,6 @@ finish_shutdown_port(port_info_t *port)
     buffer_reset(&port->tcp_to_dev);
     port->tcp_bytes_received = 0;
     port->tcp_bytes_sent = 0;
-    if (port->banner) {
-	free(port->banner->buf);
-	free(port->banner);
-	port->banner = NULL;
-    }
     if (port->devstr) {
 	free(port->devstr->buf);
 	free(port->devstr);
@@ -2331,7 +2320,6 @@ shutdown_port(port_info_t *port, tcp_info_t *tcp, char *reason)
 	close(port->bt.file);
 	port->bt.file = -1;
     }
-    sel_stop_timer(port->timer);
 
     if (port->devstr) {
 	free(port->devstr->buf);
@@ -2445,14 +2433,6 @@ portconfig(char *portnum,
     new_port = malloc(sizeof(port_info_t));
     if (new_port == NULL) {
 	return "Could not allocate a port data structure";
-    }
-
-    if (sel_alloc_timer(ser2net_sel,
-			got_timeout, new_port,
-			&new_port->timer))
-    {
-	free(new_port);
-	return "Could not allocate timer data";
     }
 
     if (sel_alloc_timer(ser2net_sel,
