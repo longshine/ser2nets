@@ -1157,8 +1157,6 @@ write_to_dev:
 	    port->tcp_to_dev_state = PORT_WAITING_OUTPUT_CLEAR;
 	}
     }
-
-    reset_timer(port);
 }
 
 /* The TCP port has room to write some data.  This is only activated
