@@ -85,7 +85,15 @@ char *enabled_str[] = { "off", "raw", "rawlp", "telnet", "rraw", "http" };
 #define PORT_BUFSIZE	64
 
 #define PORT_IS_FREE(port) (NULL == port->tcp_list)
+
+#define DEBUG 1
+#if DEBUG
 #define D(...) printf(__VA_ARGS__);
+#define tcp_print_list(...) tcp_print_list_impl(__VA_ARGS__);
+#else
+#define D(...)
+#define tcp_print_list
+#endif
 
 struct port_info;
 
@@ -676,9 +684,7 @@ tcp_new(int tcpfd)
     return tcp;
 }
 
-#define tcp_print_list tcp_print_list_impl
-//#define tcp_print_list
-
+#if DEBUG
 static void
 tcp_print_list_impl(tcp_info_t *tcp_list)
 {
@@ -690,6 +696,7 @@ tcp_print_list_impl(tcp_info_t *tcp_list)
     }
     D("\n")
 }
+#endif
 
 static int
 tcp_compare(void *t1, void *t2)
@@ -720,7 +727,7 @@ tcp_insert(port_info_t *port, tcp_info_t *tcp)
     tcp->port = port;
     tcp->timeout = port->timeout;
 
-    tcp_print_list(port->tcp_list);
+    tcp_print_list(port->tcp_list)
 
     return 0;
 }
@@ -778,7 +785,7 @@ tcp_remove(port_info_t *port, tcp_info_t *tcp)
 
     tcp_free(tcp);
 
-    tcp_print_list(port->tcp_list);
+    tcp_print_list(port->tcp_list)
 }
 
 static void
