@@ -1,3 +1,13 @@
+This is an enhanced version of ser2net with the following features:
+
+* multiple connections to the same serial port
+* multiple ports of a serial port
+* new "http" mode for WebSocket connections
+* new "rraw" mode for actively connecting to a remote port instead of
+  listening locally
+
+---------------------------------------------------------------------
+
 This is ser2net, a program for allowing network connections to serial
 ports.  See the man page for information about using the program.
 
