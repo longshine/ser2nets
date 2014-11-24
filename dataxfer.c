@@ -1939,12 +1939,6 @@ setup_tcp_port(port_info_t *port, tcp_info_t *tcp)
     port->is_2217 = 0;
     port->break_set = 0;
 
-    tcp->banner = process_str_to_buf(port, port->dinfo.banner);
-    if (tcp->banner)
-	tcp_write_handler = handle_tcp_fd_banner_write;
-    else
-	tcp_write_handler = handle_tcp_fd_write;
-
     port->devstr = process_str_to_buf(port, port->dinfo.openstr);
     if (port->devstr)
 	dev_write_handler = handle_dev_fd_devstr_write;
@@ -1981,6 +1975,12 @@ setup_tcp_port(port_info_t *port, tcp_info_t *tcp)
 
     /* end of if (PORT_IS_FREE(port))*/
     }
+
+    tcp->banner = process_str_to_buf(port, port->dinfo.banner);
+    if (tcp->banner)
+	tcp_write_handler = handle_tcp_fd_banner_write;
+    else
+	tcp_write_handler = handle_tcp_fd_write;
 
     tcp->dev_to_tcp_state = PORT_WAITING_INPUT;
 
